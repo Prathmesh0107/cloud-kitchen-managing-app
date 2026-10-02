@@ -375,3 +375,12 @@ body.modal-open {
     bottom: 0;
   }
 }
+/* iOS Safari: prevent automatic zoom when focusing form fields */
+@media (max-width: 820px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+    line-height: 1.4;
+  }
+}
