@@ -1,4 +1,10 @@
 const app = document.getElementById('app');
+
+// Bluetooth printing lives in bluetooth.js. If that file is missing, the rest of the app keeps working.
+if (!window.DKBT) {
+  const missing = async () => { throw new Error('bluetooth.js is missing from the frontend folder.'); };
+  window.DKBT = { supported: () => false, secure: () => true, status: () => 'unsupported', preferred: () => false, savedName: () => '', name: () => '', connected: () => false, info: () => '', onChange() {}, explain: e => String((e && e.message) || e), connect: missing, ensure: missing, disconnect() {}, printOrder: missing, printOrders: missing, printTest: missing };
+}
 let state = {
   page: 'dashboard', orders: [], menu: [], categories: [], settings: null, reports: null, newOrder: {category: null, cart: {}},
   selectedMonth: new Date().toISOString().slice(0, 7),
@@ -76,7 +82,7 @@ function render() {
       <div class="sidebar-bottom"><div class="demo-badge">● DEMO MODE</div><button class="reset-link" onclick="resetDemo()">Reset demo data</button></div>
     </aside>
     <main class="main"><header class="topbar"><div><div class="eyebrow">${pageLabel(state.page)}</div><h1>${pageTitle(state.page)}</h1></div>
-      <div class="top-actions"><div class="printer"><span class="dot"></span>${printerDisplay()} </div><div class="clock" id="clock"></div><div class="avatar me">DK</div></div>
+      <div class="top-actions"><div class="printer ${printerChipClass()}" onclick="printerChipClick()" title="Printer connection"><span class="dot"></span>${printerDisplay()} </div><div class="clock" id="clock"></div><div class="avatar me">DK</div></div>
     </header><section class="content">${pageView(pending, counts)}</section></main></div>`;
   tick();
 }
@@ -85,6 +91,9 @@ function pageTitle(p) { return ({dashboard:'Kitchen Dashboard', orders:'Order Hi
 function icon(p) { return ({dashboard:'⌂', orders:'▤', menu:'▦', inventory:'◈', reports:'◔', printers:'▣', settings:'⚙'}[p] || '•'); }
 function printerDisplay() {
   const s = state.settings || {};
+  if (DKBT.preferred()) return DKBT.connected()
+    ? `<b>${esc(DKBT.name())}</b><span class="connected">Bluetooth</span>`
+    : `<b>${esc(DKBT.savedName())}</b><span class="connected off">Tap to connect</span>`;
   if ((s.printer_mode === 'windows' || s.printer_mode === 'serial') && s.printer_target) return `<b>${esc(s.printer_target)}</b><span class="connected">Ready</span>`;
   return `<b>Browser Print</b><span class="connected">Fallback</span>`;
 }
@@ -238,7 +247,136 @@ function reportsPage() {
   <div class="panel"><div class="section-head tight"><div><h2>Inventory spend</h2><p>Purchases for ${month}.</p></div></div>${(inv.by_item || []).slice(0, 5).map(x => `<div class="metric-line"><span>${esc(x.item_name)}</span><b>${money(x.total_cost)}</b></div>`).join('') || '<div class="empty">No purchases</div>'}<div class="metric-line"><span>Total for ${month}</span><b>${money(inv.total_spend)}</b></div></div></div>`;
 }
 
+// ---------- Bluetooth printing (Web Bluetooth) ----------
+let btBusy = false;
+let toastTimer = null;
+function toast(msg, kind = '') {
+  let t = document.getElementById('dk-toast');
+  if (!t) { t = document.createElement('div'); t.id = 'dk-toast'; }
+  document.body.appendChild(t); // re-append so it always sits above the modal layer
+  t.textContent = msg;
+  t.className = 'dk-toast show ' + kind;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+}
+function hideToast() { const t = document.getElementById('dk-toast'); if (t) t.classList.remove('show'); }
+function printerChipClass() { return DKBT.preferred() && !DKBT.connected() ? 'bt-off' : ''; }
+function refreshBtUi() {
+  if (state.page === 'printers') return render();
+  const chip = document.querySelector('.top-actions .printer');
+  if (chip) { chip.className = 'printer ' + printerChipClass(); chip.innerHTML = '<span class="dot"></span>' + printerDisplay() + ' '; }
+}
+// Tapping the printer chip reconnects a Bluetooth printer, otherwise opens Printer Setup.
+async function printerChipClick() {
+  if (!DKBT.preferred() || DKBT.connected()) return nav('printers');
+  if (btBusy) return;
+  btBusy = true;
+  try { await DKBT.ensure(); toast('Connected to ' + DKBT.name(), 'ok'); }
+  catch (err) { const m = DKBT.explain(err); if (m) alert(m); }
+  finally { btBusy = false; refreshBtUi(); }
+}
+// Runs a print job over Bluetooth: connect if needed, send, show a small toast.
+async function printViaBluetooth(task, doneMsg) {
+  if (btBusy) return toast('Printer is busy, one moment…');
+  btBusy = true;
+  try {
+    await DKBT.ensure();
+    toast('Printing…');
+    const r = await task();
+    if (r === false) hideToast(); else toast(doneMsg || 'Sent to ' + DKBT.name(), 'ok');
+  } catch (err) {
+    hideToast();
+    const m = DKBT.explain(err);
+    if (m) alert(m);
+  } finally { btBusy = false; refreshBtUi(); }
+}
+async function btConnectUi() {
+  if (btBusy) return;
+  btBusy = true;
+  try {
+    const name = await DKBT.connect();
+    state.printerSetup.btTest = null;
+    toast('Connected to ' + name, 'ok');
+  } catch (err) {
+    const m = DKBT.explain(err);
+    if (m) alert(m);
+  } finally { btBusy = false; refreshBtUi(); }
+}
+async function btTestUi() {
+  if (btBusy) return toast('Printer is busy, one moment…');
+  btBusy = true;
+  try {
+    await DKBT.ensure();
+    await DKBT.printTest(state.settings);
+    state.printerSetup.btTest = { ok: true, message: 'Test receipt sent to ' + DKBT.name() + '. If it printed a line of numbers 1234567890…, printing is ready.' };
+  } catch (err) {
+    const m = DKBT.explain(err);
+    if (m) state.printerSetup.btTest = { ok: false, message: m };
+  } finally { btBusy = false; refreshBtUi(); }
+}
+function btDisconnectUi() {
+  DKBT.disconnect();
+  state.printerSetup.btTest = null;
+  toast('Bluetooth printer disconnected');
+}
+function setPrinterTab(tab) {
+  state.printerSetup.tab = tab;
+  render();
+  if (tab === 'windows') loadPrinters().catch(() => {});
+}
+
 function printersPage() {
+  const ps = state.printerSetup || (state.printerSetup = { step: 1, test: null });
+  const s = state.settings || {};
+  const winConfigured = ['windows', 'serial'].includes(s.printer_mode) && s.printer_target;
+  const tab = ps.tab || (!DKBT.preferred() && winConfigured ? 'windows' : 'bluetooth');
+  const tabs = `<div class="setup-steps two"><button class="setup-step ${tab === 'bluetooth' ? 'active' : ''}" onclick="setPrinterTab('bluetooth')"><span>📱</span><b>Phone / Bluetooth</b></button><button class="setup-step ${tab === 'windows' ? 'active' : ''}" onclick="setPrinterTab('windows')"><span>🖥</span><b>Windows PC / COM port</b></button></div>`;
+  return tabs + (tab === 'windows' ? windowsPrinterPage() : bluetoothPrinterPage());
+}
+
+function bluetoothPrinterPage() {
+  const ps = state.printerSetup || {};
+  const status = DKBT.status();
+  const ok = status === 'ok';
+  const on = DKBT.connected();
+  const saved = DKBT.savedName();
+  const test = ps.btTest;
+  const badge = !ok ? '<span class="connection-badge bad">Not available here</span>'
+    : on ? `<span class="connection-badge">Connected: ${esc(DKBT.name())}</span>`
+    : '<span class="connection-badge off">Not connected</span>';
+  const blocked = status === 'insecure'
+    ? '<div class="hint-box"><b>Needs HTTPS.</b> Browsers only allow Bluetooth on secure pages. Open this app with its https:// address (your Render link), or use localhost on the same computer.</div>'
+    : status === 'unsupported'
+    ? '<div class="hint-box"><b>This browser can\'t use Bluetooth printing.</b> Use <b>Chrome</b> or <b>Edge</b> on Android, Windows, Mac or Chromebook. iPhone / iPad Safari and Chrome don\'t support it. On an iPhone, install the free <b>Bluefy</b> browser and open this app there.</div>'
+    : '';
+  return `<div class="setup-grid"><div class="panel setup-main">
+    <div class="section-head tight"><div><span class="eyebrow">PHONE · TABLET · PC</span><h2>Print over Bluetooth</h2><p>Connects this browser straight to a 58mm Bluetooth thermal printer. No cable, driver or PC needed.</p></div>${badge}</div>
+    ${blocked}
+    <div class="connection-summary"><div><span>Printer</span><b>${esc(on ? DKBT.name() : (saved || 'Not selected'))}</b></div><div><span>Status</span><b>${on ? 'Connected' : 'Disconnected'}</b></div><div><span>Print channel</span><b>${esc(on ? DKBT.info() : '—')}</b></div></div>
+    ${test ? `<div class="test-result ${test.ok ? 'success' : 'failure'}"><b>${test.ok ? '✓ Test receipt sent' : '⚠ Test failed'}</b><p>${esc(test.message)}</p></div>` : ''}
+    <div class="mini-actions bt-actions">
+      <button class="btn btn-primary" onclick="btConnectUi()" ${ok ? '' : 'disabled'}>${on ? 'Choose another printer' : 'Connect printer'}</button>
+      <button class="btn" onclick="btTestUi()" ${ok ? '' : 'disabled'}>Print test receipt</button>
+      ${on || saved ? '<button class="btn" onclick="btDisconnectUi()">Disconnect</button>' : ''}
+    </div>
+    <div class="instruction-list">
+      <div class="instruction"><span>1</span><div><b>Switch on the printer</b><small>Load paper and keep it within a metre or two. If it was connected to another phone or PC, switch Bluetooth off on that device first.</small></div></div>
+      <div class="instruction"><span>2</span><div><b>Turn Bluetooth on</b><small>On Android, allow "Nearby devices" (older Android: Location) for the browser when it asks.</small></div></div>
+      <div class="instruction"><span>3</span><div><b>Tap Connect printer</b><small>Pick your printer from the list (names like "PT-210", "MPT-II" or "BlueTooth Printer") and tap Pair. You do not need to pair it in the phone's Bluetooth settings first.</small></div></div>
+      <div class="instruction"><span>4</span><div><b>Print a test receipt</b><small>Then use <b>Print</b> on any order. The app reconnects by itself; if it can't, tap the printer chip at the top of the screen.</small></div></div>
+    </div>
+    <div class="hint-box"><b>Good to know:</b> only Bluetooth Low Energy (BLE) printers show up in a browser. A printer that is "classic Bluetooth only" won't appear in the list; use it with the Windows PC tab instead. Hindi / Marathi text prints as "?" because the printer only handles plain English letters.</div>
+  </div>
+  <div class="panel setup-side"><h2>Troubleshooting</h2>
+    <details open><summary>Printer is not in the list</summary><p>Switch the printer off and on, make sure no other phone or PC is connected to it, and keep it close. Some printers show two names (one with "BLE"), so try the other. Check that Bluetooth and the Nearby devices permission are on.</p></details>
+    <details><summary>Connected but nothing prints</summary><p>Check paper and the cover, then switch the printer off and on and connect again. The "Print channel" box above shows how the app is talking to the printer.</p></details>
+    <details><summary>Strange characters print</summary><p>The printer may not support standard ESC/POS commands. Try the test receipt: the numbers line should print cleanly.</p></details>
+    <details><summary>Stops working after a while</summary><p>Many printers go to sleep when idle. Press Print and the app reconnects, or tap the printer chip at the top of the screen.</p></details>
+    <details><summary>Printing feels slow</summary><p>Bluetooth Low Energy sends data in small pieces, so a receipt takes a second or two. That is normal.</p></details>
+  </div></div>`;
+}
+
+function windowsPrinterPage() {
   const p = state.printers || { printers: [], ports: [] }, s = state.settings || {}, ps = state.printerSetup || { step: 1, test: null };
   const step = ps.step || 1;
   const selected = s.printer_target || '';
@@ -642,6 +780,9 @@ async function printOrderInto(o, win) {
   else window.print();
 }
 async function printOrder(id) {
+  if (DKBT.preferred()) {
+    return printViaBluetooth(async () => { await DKBT.printOrder(await api('/api/print/' + id), state.settings); });
+  }
   const win = openPrintShell();
   try { const o = await api('/api/print/' + id); await printOrderInto(o, win); }
   catch (err) { if (win) win.close(); alert(err.message || 'Could not print order'); }
@@ -656,6 +797,12 @@ function batchReceiptHtml(orders) {
 async function printAllOrders() {
   const shown = filteredOrders();
   if (!shown.length) return alert('There are no orders to print with the current filters.');
+  if (DKBT.preferred()) {
+    return printViaBluetooth(async () => {
+      if (shown.length > 8 && !confirm(`Print ${shown.length} tickets over Bluetooth? This can take a minute.`)) return false;
+      await DKBT.printOrders(shown, state.settings);
+    }, `Sent ${shown.length} ticket${shown.length === 1 ? '' : 's'} to ${DKBT.name()}`);
+  }
   const ids = shown.map(o => o.id);
   const s = state.settings || {};
   if ((s.printer_mode === 'windows' || s.printer_mode === 'serial') && s.printer_target) {
@@ -776,6 +923,7 @@ function goToDashboardAfterPrinter() { state.printerSetup.test = null; nav('dash
 async function saveSettings() { const s = state.settings || {}; const p = {business_name:document.getElementById('s-name').value,address:document.getElementById('s-address').value,phone:document.getElementById('s-phone').value,gst_number:document.getElementById('s-gst').value,printer_name:document.getElementById('s-printer').value,paper_size:document.getElementById('s-paper').value,auto_print:document.getElementById('s-auto').checked,default_order_type:document.getElementById('s-default').value,tax_percent:Number(document.getElementById('s-tax').value || 0),delivery_fee:Number(document.getElementById('s-fee').value || 0),printer_mode:s.printer_mode || 'browser',printer_target:s.printer_target || '',printer_baudrate:Number(s.printer_baudrate || 9600)}; state.settings = await api('/api/settings',{method:'PUT',body:JSON.stringify(p)}); render(); alert('Settings saved.'); }
 async function resetDemo() { if (confirm('Reset demo orders and inventory to the sample dataset?')) { await api('/api/demo/reset',{method:'POST'}); await load(); } }
 
-window.nav=nav; window.changeMonth=changeMonth; window.openNewOrder=openNewOrder; window.selectOrderCategory=selectOrderCategory; window.reviewNewOrder=reviewNewOrder; window.backToNewOrderEdit=backToNewOrderEdit; window.adjustReviewQty=adjustReviewQty; window.removeReviewItem=removeReviewItem; window.confirmReviewedOrder=confirmReviewedOrder; window.reorderCategory=reorderCategory; window.changeOrderQty=changeOrderQty; window.showOrder=showOrder; window.editOrder=editOrder; window.printOrder=printOrder; window.printAllOrders=printAllOrders; window.moveOrder=moveOrder; window.filterOrders=filterOrders; window.openMenuModal=openMenuModal; window.openCategoryModal=openCategoryModal; window.deleteCategory=deleteCategory; window.toggleMenu=toggleMenu; window.deleteMenu=deleteMenu; window.openInventoryModal=openInventoryModal; window.editInventory=editInventory; window.deleteInventory=deleteInventory; window.saveSettings=saveSettings; window.loadPrinters=loadPrinters; window.pickPrinter=pickPrinter; window.savePrinterConfig=savePrinterConfig; window.setPrinterStep=setPrinterStep; window.syncPrinterTargets=syncPrinterTargets; window.testHardwarePrint=testHardwarePrint; window.goToDashboardAfterPrinter=goToDashboardAfterPrinter; window.testPrint=testPrint; window.resetDemo=resetDemo; window.closeModal=closeModal; window.loadInventory=loadInventory;
+window.nav=nav; window.changeMonth=changeMonth; window.openNewOrder=openNewOrder; window.selectOrderCategory=selectOrderCategory; window.reviewNewOrder=reviewNewOrder; window.backToNewOrderEdit=backToNewOrderEdit; window.adjustReviewQty=adjustReviewQty; window.removeReviewItem=removeReviewItem; window.confirmReviewedOrder=confirmReviewedOrder; window.reorderCategory=reorderCategory; window.changeOrderQty=changeOrderQty; window.showOrder=showOrder; window.editOrder=editOrder; window.printOrder=printOrder; window.printAllOrders=printAllOrders; window.moveOrder=moveOrder; window.filterOrders=filterOrders; window.openMenuModal=openMenuModal; window.openCategoryModal=openCategoryModal; window.deleteCategory=deleteCategory; window.toggleMenu=toggleMenu; window.deleteMenu=deleteMenu; window.openInventoryModal=openInventoryModal; window.editInventory=editInventory; window.deleteInventory=deleteInventory; window.saveSettings=saveSettings; window.loadPrinters=loadPrinters; window.pickPrinter=pickPrinter; window.savePrinterConfig=savePrinterConfig; window.setPrinterStep=setPrinterStep; window.syncPrinterTargets=syncPrinterTargets; window.testHardwarePrint=testHardwarePrint; window.goToDashboardAfterPrinter=goToDashboardAfterPrinter; window.testPrint=testPrint; window.resetDemo=resetDemo; window.closeModal=closeModal; window.loadInventory=loadInventory; window.setPrinterTab=setPrinterTab; window.btConnectUi=btConnectUi; window.btTestUi=btTestUi; window.btDisconnectUi=btDisconnectUi; window.printerChipClick=printerChipClick;
 
+DKBT.onChange(refreshBtUi);
 load().catch(e => { app.innerHTML = `<div style="padding:40px;font-family:system-ui"><h1>Could not start Demo Kitchen</h1><p>${esc(e.message)}</p></div>`; });
