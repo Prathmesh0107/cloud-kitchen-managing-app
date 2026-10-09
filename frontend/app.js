@@ -18,7 +18,7 @@ const esc = s => String(s ?? '').replace(/[&<>'"]/g, c => ({ '&':'&amp;', '<':'&
 function storedBiz() { try { return localStorage.getItem('dk_biz') || ''; } catch (e) { return ''; } }
 function bizName(s) {
   const n = String((s || state.settings || {}).business_name || storedBiz() || '').trim();
-  return n || 'Prems Kitchen';
+  return n || 'Demo Kitchen';
 }
 function bizInitials(name) {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
@@ -67,7 +67,7 @@ async function load() {
   state.inventory.month = month;
   await Promise.all([
     loadPeriodData(),
-    (async()=>{ [state.menu, state.categories, state.settings] = await Promise.all([api('/api/menu-items'), api('/api/categories'), api('/api/settings', { cache: 'no-store' })]); rememberBiz(state.settings && state.settings.business_name); })()
+    (async()=>{ [state.menu, state.categories, state.settings] = await Promise.all([api('/api/menu-items'), api('/api/categories'), api('/api/settings')]); rememberBiz(state.settings && state.settings.business_name); })()
   ]);
   render();
 }
